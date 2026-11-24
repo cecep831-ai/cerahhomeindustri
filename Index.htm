@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>P2P Video Call & Chat (Zero Cloud)</title>
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 16px; }
+    .container { max-width: 920px; margin: auto; display: grid; gap: 14px; }
+    .card { background: #1e293b; padding: 16px; border-radius: 12px; border: 1px solid #334155; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    input, button { padding: 10px 14px; border-radius: 8px; border: none; font-size: 14px; }
+    input { background: #0f172a; color: #fff; border: 1px solid #334155; flex: 1; min-width: 180px; }
+    button { background: #3b82f6; color: #fff; cursor: pointer; font-weight: 600; transition: 0.15s; }
+    button:hover { background: #2563eb; }
+    button.secondary { background: #475569; }
+    button.secondary:hover { background: #334155; }
+    button.danger { background: #ef4444; }
+    button.danger:hover { background: #dc2626; }
+    .videos { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+    .video-wrap { position: relative; }
+    .video-wrap span { position: absolute; bottom: 8px; left: 8px; background: rgba(15,23,42,0.75); padding: 3px 8px; border-radius: 6px; font-size: 12px; }
+    video { width: 100%; background: #020617; border-radius: 10px; aspect-ratio: 16/9; object-fit: cover; display: block; }
+    #chatBox { height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 12px; background: #0f172a; border-radius: 8px; border: 1px solid #334155; }
+    .msg { max-width: 75%; padding: 8px 12px; border-radius: 10px; font-size: 14px; line-height: 1.4; word-break: break-word; }
+    .me { align-self: flex-end; background: #2563eb; }
+    .peer { align-self: flex-start; background: #334155; }
+    .msg img { max-width: 100%; border-radius: 6px; margin-top: 4px; display: block; }
+    .badge { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 12px; background: #0f172a; color: #38bdf8; border: 1px solid #334155; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- Koneksi & Undangan -->
+    <div class="card">
+      <div class="row" style="justify-content: space-between; margin-bottom: 10px;">
+        <div>ID Anda: <strong id="myId">Menghubungkan...</strong></div>
+        <button class="secondary" onclick="copyInviteLink()">Salin Link Undangan</button>
+      </div>
+      <div class="row">
+        <input type="text" id="remoteIdInput" placeholder="Atau tempel ID lawan bicara..." />
+        <button onclick="connectToPeer()">Hubungkan Chat</button>
+        <button onclick="startVideoCall()">Video Call</button>
+      </div>
+      <div style="margin-top: 10px;">
+        <span class="badge" id="statusText">Status: Menunggu koneksi P2P...</span>
+      </div>
+    </div>
+
+    <!-- Layar Video -->
+    <div class="card">
+      <div class="videos">
+        <div class="video-wrap">
+          <video id="localVideo" autoplay muted playsinline></video>
+          <span>Kamera Anda</span>
+        </div>
+        <div class="video-wrap">
+          <video id="remoteVideo" autoplay playsinline></video>
+          <span>Lawan Bicara</span>
+        </div>
+      </div>
+      <div class="row" style="margin-top: 12px; justify-content: center;">
+        <button class="secondary" id="btnMic" onclick="toggleMic()">Mute Mic</button>
+        <button class="secondary" id="btnCam" onclick="toggleCam()">Matikan Kamera</button>
+        <button class="danger" onclick="endVideoCall()">Akhiri Call</button>
+      </div>
+    </div>
+
+    <!-- Chat & Kirim Gambar P2P -->
+    <div class="card">
+      <div id="chatBox"></div>
+      <div class="row" style="margin-top: 12px;">
+        <input type="text" id="msgInput" placeholder="Ketik pesan langsung (tidak disimpan di cloud)..." onkeypress="if(event.key==='Enter') sendText()" />
+        <input type="file" id="imgInput" accept="image/*" style="display: none;" onchange="sendImage(event)" />
+        <button class="secondary" onclick="document.getElementById('imgInput').click()">Gambar</button>
+        <button onclick="sendText()">Kirim</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const peer = new Peer({
+      config: {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' }
+        ]
+      }
+    });
+
+    let myPeerId = '';
+    let dataConn = null;
+    let currentCall = null;
+    let localStream = null;
+
+    const statusEl = document.getElementById('statusText');
+    const chatBox = document.getElementById('chatBox');
+
+    peer.on('open', (id) => {
+      myPeerId = id;
+      document.getElementById('myId').textContent = id;
+
+      // Otomatis terhubung jika dibuka melalui link undangan (?to=ID)
+      const params = new URLSearchParams(window.location.search);
+      const targetId = params.get('to');
+      if (targetId && targetId !== id) {
+        document.getElementById('remoteIdInput').value = targetId;
+        connectToPeer();
+      }
+    });
+
+    peer.on('connection', (conn) => setupDataConnection(conn));
+
+    peer.on('call', async (call) => {
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        document.getElementById('localVideo').srcObject = localStream;
+        call.answer(localStream);
+        handleCallStream(call);
+      } catch (err) {
+        alert('Izin kamera/mikrofon ditolak: ' + err.message);
+      }
+    });
+
+    function copyInviteLink() {
+      if (!myPeerId) return alert('Tunggu hingga ID selesai dibuat.');
+      const inviteUrl = `${window.location.origin}${window.location.pathname}?to=${myPeerId}`;
+      navigator.clipboard.writeText(inviteUrl);
+      statusEl.textContent = 'Status: Link undangan disalin! Kirimkan ke lawan bicara.';
+    }
+
+    function connectToPeer() {
+      const remoteId = document.getElementById('remoteIdInput').value.trim();
+      if (!remoteId) return alert('Masukkan ID lawan bicara terlebih dahulu.');
+      const conn = peer.connect(remoteId, { reliable: true });
+      setupDataConnection(conn);
+    }
+
+    function setupDataConnection(conn) {
+      dataConn = conn;
+      dataConn.on('open', () => {
+        statusEl.textContent = 'Status: Terhubung P2P (Enkripsi Langsung)';
+      });
+      dataConn.on('data', (payload) => {
+        if (payload.type === 'text') appendMessage(payload.content, 'peer');
+        if (payload.type === 'image') appendImage(payload.content, 'peer');
+      });
+      dataConn.on('close', () => {
+        statusEl.textContent = 'Status: Koneksi terputus.';
+      });
+    }
+
+    async function startVideoCall() {
+      const remoteId = document.getElementById('remoteIdInput').value.trim() || (dataConn && dataConn.peer);
+      if (!remoteId) return alert('Masukkan ID atau buka lewat link undangan terlebih dahulu.');
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        document.getElementById('localVideo').srcObject = localStream;
+        const call = peer.call(remoteId, localStream);
+        handleCallStream(call);
+      } catch (err) {
+        alert('Gagal mengakses kamera/mikrofon: ' + err.message);
+      }
+    }
+
+    function handleCallStream(call) {
+      currentCall = call;
+      statusEl.textContent = 'Status: Video call aktif (P2P)';
+      call.on('stream', (remoteStream) => {
+        document.getElementById('remoteVideo').srcObject = remoteStream;
+      });
+      call.on('close', endVideoCall);
+    }
+
+    function toggleMic() {
+      if (!localStream) return;
+      const track = localStream.getAudioTracks()[0];
+      track.enabled = !track.enabled;
+      document.getElementById('btnMic').textContent = track.enabled ? 'Mute Mic' : 'Unmute Mic';
+    }
+
+    function toggleCam() {
+      if (!localStream) return;
+      const track = localStream.getVideoTracks()[0];
+      track.enabled = !track.enabled;
+      document.getElementById('btnCam').textContent = track.enabled ? 'Matikan Kamera' : 'Nyalakan Kamera';
+    }
+
+    function endVideoCall() {
+      if (currentCall) currentCall.close();
+      if (localStream) localStream.getTracks().forEach(t => t.stop());
+      localStream = null;
+      document.getElementById('localVideo').srcObject = null;
+      document.getElementById('remoteVideo').srcObject = null;
+      statusEl.textContent = dataConn && dataConn.open ? 'Status: Terhubung P2P (Chat saja)' : 'Status: Panggilan berakhir.';
+    }
+
+    function sendText() {
+      const input = document.getElementById('msgInput');
+      const text = input.value.trim();
+      if (!text || !dataConn || !dataConn.open) return;
+      dataConn.send({ type: 'text', content: text });
+      appendMessage(text, 'me');
+      input.value = '';
+    }
+
+    function sendImage(event) {
+      const file = event.target.files[0];
+      if (!file || !dataConn || !dataConn.open) return;
+
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          const MAX_WIDTH = 800;
+          const scale = Math.min(1, MAX_WIDTH / img.width);
+          canvas.width = img.width * scale;
+          canvas.height = img.height * scale;
+
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+          const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.75);
+          dataConn.send({ type: 'image', content: compressedDataUrl });
+          appendImage(compressedDataUrl, 'me');
+        };
+        img.src = e.target.result;
+      };
+      reader.readAsDataURL(file);
+      event.target.value = '';
+    }
+
+    function appendMessage(text, sender) {
+      const div = document.createElement('div');
+      div.className = `msg ${sender}`;
+      div.textContent = text;
+      chatBox.appendChild(div);
+      chatBox.scrollTop = chatBox.scrollHeight;
+    }
+
+    function appendImage(dataUrl, sender) {
+      const div = document.createElement('div');
+      div.className = `msg ${sender}`;
+      const img = document.createElement('img');
+      img.src = dataUrl;
+      div.appendChild(img);
+      chatBox.appendChild(div);
+      chatBox.scrollTop = chatBox.scrollHeight;
+    }
+  </script>
+</body>
+</html>
